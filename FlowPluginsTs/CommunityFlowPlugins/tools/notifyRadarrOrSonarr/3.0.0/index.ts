@@ -11,11 +11,25 @@ const parseSxxEyy = (fileName: string): { season: number, episode: number } | nu
   return m ? { season: Number(m[1]), episode: Number(m[2]) } : null;
 };
 
+// Plex-style {imdb-tt1234567} / {tmdb-1234} / {tvdb-1234} tags, gated per arr:
+// radarr lookup accepts imdb:/tmdb: terms, sonarr accepts imdb:/tvdb:.
+// Falls back to a bare imdb id anywhere in the path; '' means use the parse API.
+const getLookupTerm = (arrName: string, fileName: string): string => {
+  const supported = arrName === 'radarr' ? ['imdb', 'tmdb'] : ['imdb', 'tvdb'];
+  const m = /\{(imdb|tmdb|tvdb)-((?:tt|nm|co|ev|ch|ni)\d{7,10}|\d+)\}/i.exec(fileName);
+  if (m && supported.includes(m[1].toLowerCase())) {
+    return `${m[1].toLowerCase()}:${m[2]}`;
+  }
+  const imdbId = /\b(?:tt|nm|co|ev|ch|ni)\d{7,10}?\b/i.exec(fileName)?.[0] ?? '';
+  return imdbId ? `imdb:${imdbId}` : '';
+};
+
 /* -------------- plugin details -------------- */
 const details = (): IpluginDetails => ({
   name: 'Notify Radarr or Sonarr',
   description:
-    'Notify Radarr or Sonarr to refresh after file change. Optionally unmonitor the item afterwards.',
+    'Notify Radarr or Sonarr to refresh after file change. Optionally unmonitor the item afterwards. '
+    + 'Unlike 2.0.0, does not wait for the scan to complete before continuing.',
   style: {
     borderColor: 'green',
   },
@@ -110,21 +124,21 @@ interface IArrApp {
   }
 }
 
-/* -------------- getId (unchanged from 2.0.0) -------------- */
+/* -------------- getId -------------- */
 const getId = async (
   args: IpluginInputArgs,
   arrApp: IArrApp,
   fileName: string,
 ): Promise<number> => {
-  const imdbId = /\b(tt|nm|co|ev|ch|ni)\d{7,10}?\b/i.exec(fileName)?.[0] ?? '';
-  let id = (imdbId !== '')
+  const term = getLookupTerm(arrApp.name, fileName);
+  let id = (term !== '')
     ? Number((await args.deps.axios({
       method: 'get',
-      url: `${arrApp.host}/api/v3/${arrApp.name === 'radarr' ? 'movie' : 'series'}/lookup?term=imdb:${imdbId}`,
+      url: `${arrApp.host}/api/v3/${arrApp.name === 'radarr' ? 'movie' : 'series'}/lookup?term=${term}`,
       headers: arrApp.headers,
     })).data?.[0]?.id ?? -1)
     : -1;
-  args.jobLog(`${arrApp.content} ${id !== -1 ? `'${id}' found` : 'not found'} for imdb '${imdbId}'`);
+  args.jobLog(`${arrApp.content} ${id !== -1 ? `'${id}' found` : 'not found'} for '${term}'`);
   if (id === -1) {
     id = arrApp.delegates.getIdFromParseResponse(
       (await args.deps.axios({
@@ -144,16 +158,13 @@ const unmonitorRadarr = async (
   arrApp: IArrApp,
   movieId: number,
 ): Promise<void> => {
-  const movie = await args.deps.axios({
-    method: 'get',
-    url: `${arrApp.host}/api/v3/movie/${movieId}`,
-    headers: arrApp.headers,
-  });
+  // Bulk editor endpoint updates only the monitored flag, so a concurrently
+  // running RefreshMovie command can't be clobbered by a stale full-object PUT.
   await args.deps.axios({
     method: 'put',
-    url: `${arrApp.host}/api/v3/movie/${movieId}`,
+    url: `${arrApp.host}/api/v3/movie/editor`,
     headers: arrApp.headers,
-    data: JSON.stringify({ ...movie.data, monitored: false }),
+    data: JSON.stringify({ movieIds: [movieId], monitored: false }),
   });
   args.jobLog(`✔ Radarr: movie id=${movieId} unmonitored`);
 };
@@ -184,35 +195,13 @@ const unmonitorSonarrEpisode = async (
     return;
   }
 
-  try {
-    await args.deps.axios({
-      method: 'put',
-      url: `${arrApp.host}/api/v3/episode/monitor`,
-      headers: arrApp.headers,
-      params: { includeImages: false },
-      data: JSON.stringify({ monitored: false, episodeIds: [match.id] }),
-    });
-    args.jobLog(`✔ Sonarr: unmonitored S${season}E${episode} (episodeId=${match.id}) via PUT /episode/monitor`);
-    return;
-  } catch (e) {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const code = (e as any)?.response?.status;
-    if (code !== 405 && code !== 404) throw e;
-    args.jobLog(`Sonarr /episode/monitor unsupported (${code}), falling back to PUT /episode`);
-  }
-
-  const epFull = await args.deps.axios({
-    method: 'get',
-    url: `${arrApp.host}/api/v3/episode/${match.id}`,
-    headers: arrApp.headers,
-  });
   await args.deps.axios({
     method: 'put',
-    url: `${arrApp.host}/api/v3/episode`,
+    url: `${arrApp.host}/api/v3/episode/monitor`,
     headers: arrApp.headers,
-    data: JSON.stringify([{ ...epFull.data, monitored: false }]),
+    data: JSON.stringify({ monitored: false, episodeIds: [match.id] }),
   });
-  args.jobLog(`✔ Sonarr: unmonitored S${season}E${episode} (episodeId=${match.id}) via PUT /episode`);
+  args.jobLog(`✔ Sonarr: unmonitored S${season}E${episode} (episodeId=${match.id})`);
 };
 
 /* -------------- main plugin -------------- */

@@ -65,7 +65,7 @@ describe('notifyRadarrOrSonarr 3.0.0 Plugin', () => {
         data: JSON.stringify({ name: 'RefreshMovie', movieIds: [123] }),
       });
       expect(result.outputNumber).toBe(1);
-      expect(baseArgs.jobLog).toHaveBeenCalledWith("Movie '123' found for imdb 'tt1234567'");
+      expect(baseArgs.jobLog).toHaveBeenCalledWith("Movie '123' found for 'imdb:tt1234567'");
       expect(baseArgs.jobLog).toHaveBeenCalledWith("✔ Movie '123' refreshed in radarr.");
     });
 
@@ -78,7 +78,7 @@ describe('notifyRadarrOrSonarr 3.0.0 Plugin', () => {
       const result = await plugin(baseArgs);
 
       expect(result.outputNumber).toBe(1);
-      expect(baseArgs.jobLog).toHaveBeenCalledWith("Movie not found for imdb 'tt1234567'");
+      expect(baseArgs.jobLog).toHaveBeenCalledWith("Movie not found for 'imdb:tt1234567'");
       expect(baseArgs.jobLog).toHaveBeenCalledWith("Movie '456' found for 'Test Movie (2023)'");
     });
 
@@ -100,6 +100,37 @@ describe('notifyRadarrOrSonarr 3.0.0 Plugin', () => {
       expect(mockAxios).toHaveBeenCalledWith(
         expect.objectContaining({
           url: 'http://192.168.1.1:7878/api/v3/movie/lookup?term=imdb:tt1234567',
+        }),
+      );
+    });
+
+    it('looks up by tmdb id from Plex-style {tmdb-} tag', async () => {
+      baseArgs.originalLibraryFile._id = 'C:/Movies/Test Movie (2023) {tmdb-603}/Test Movie (2023).mkv';
+
+      await plugin(baseArgs);
+
+      expect(mockAxios).toHaveBeenCalledWith(
+        expect.objectContaining({
+          url: 'http://192.168.1.1:7878/api/v3/movie/lookup?term=tmdb:603',
+        }),
+      );
+      expect(baseArgs.jobLog).toHaveBeenCalledWith("Movie '123' found for 'tmdb:603'");
+    });
+
+    it('ignores {tvdb-} tag for radarr and falls back to parse API', async () => {
+      baseArgs.originalLibraryFile._id = 'C:/Movies/Test Movie (2023) {tvdb-1234}/Test Movie (2023).mkv';
+      baseArgs.inputFileObj._id = baseArgs.originalLibraryFile._id;
+
+      mockAxios
+        .mockResolvedValueOnce({ data: { movie: { id: 456 } } }) // parse API (no lookup call)
+        .mockResolvedValueOnce({}); // command
+
+      const result = await plugin(baseArgs);
+
+      expect(result.outputNumber).toBe(1);
+      expect(mockAxios).toHaveBeenCalledWith(
+        expect.objectContaining({
+          url: expect.stringContaining('/api/v3/parse?title='),
         }),
       );
     });
@@ -151,6 +182,18 @@ describe('notifyRadarrOrSonarr 3.0.0 Plugin', () => {
       });
       expect(result.outputNumber).toBe(1);
     });
+
+    it('looks up by tvdb id from Plex-style {tvdb-} tag', async () => {
+      baseArgs.originalLibraryFile._id = 'C:/TV Shows/Test Series {tvdb-123456}/Season 01/Test Series S01E01.mkv';
+
+      await plugin(baseArgs);
+
+      expect(mockAxios).toHaveBeenCalledWith(
+        expect.objectContaining({
+          url: 'http://192.168.1.1:8989/api/v3/series/lookup?term=tvdb:123456',
+        }),
+      );
+    });
   });
 
   // ─── Radarr unmonitor ──────────────────────────────────────────────────────
@@ -160,27 +203,20 @@ describe('notifyRadarrOrSonarr 3.0.0 Plugin', () => {
       baseArgs.inputs.unmonitor_after_refresh = 'true';
     });
 
-    it('unmonitors movie after refresh via GET then PUT', async () => {
+    it('unmonitors movie after refresh via PUT /movie/editor', async () => {
       mockAxios
         .mockResolvedValueOnce({ data: [{ id: 123 }] }) // IMDB lookup
         .mockResolvedValueOnce({}) // RefreshMovie command
-        .mockResolvedValueOnce({ data: { id: 123, monitored: true, title: 'Test Movie' } }) // GET movie
-        .mockResolvedValueOnce({}); // PUT movie
+        .mockResolvedValueOnce({}); // PUT movie/editor
 
       const result = await plugin(baseArgs);
 
       expect(result.outputNumber).toBe(1);
       expect(mockAxios).toHaveBeenCalledWith(
         expect.objectContaining({
-          method: 'get',
-          url: 'http://192.168.1.1:7878/api/v3/movie/123',
-        }),
-      );
-      expect(mockAxios).toHaveBeenCalledWith(
-        expect.objectContaining({
           method: 'put',
-          url: 'http://192.168.1.1:7878/api/v3/movie/123',
-          data: expect.stringContaining('"monitored":false'),
+          url: 'http://192.168.1.1:7878/api/v3/movie/editor',
+          data: JSON.stringify({ movieIds: [123], monitored: false }),
         }),
       );
       expect(baseArgs.jobLog).toHaveBeenCalledWith('✔ Radarr: movie id=123 unmonitored');
@@ -218,13 +254,13 @@ describe('notifyRadarrOrSonarr 3.0.0 Plugin', () => {
       mockAxios
         .mockResolvedValueOnce({ data: [{ id: 123 }] })
         .mockResolvedValueOnce({}) // command
-        .mockRejectedValueOnce(new Error('GET movie failed')); // unmonitor GET fails
+        .mockRejectedValueOnce(new Error('PUT movie/editor failed')); // unmonitor PUT fails
 
       const result = await plugin(baseArgs);
 
       expect(result.outputNumber).toBe(1);
       expect(baseArgs.jobLog).toHaveBeenCalledWith(
-        expect.stringContaining('Unmonitor error (non-fatal): GET movie failed'),
+        expect.stringContaining('Unmonitor error (non-fatal): PUT movie/editor failed'),
       );
     });
   });
@@ -261,29 +297,7 @@ describe('notifyRadarrOrSonarr 3.0.0 Plugin', () => {
         }),
       );
       expect(baseArgs.jobLog).toHaveBeenCalledWith(
-        expect.stringContaining('unmonitored S1E5 (episodeId=99) via PUT /episode/monitor'),
-      );
-    });
-
-    it('falls back to PUT /episode when /episode/monitor returns 405', async () => {
-      const err405 = Object.assign(new Error('Method Not Allowed'), { response: { status: 405 } });
-
-      mockAxios
-        .mockResolvedValueOnce({ data: [{ id: 42 }] }) // series lookup
-        .mockResolvedValueOnce({}) // command
-        .mockResolvedValueOnce({ data: [{ id: 99, seasonNumber: 1, episodeNumber: 5 }] }) // GET /episode
-        .mockRejectedValueOnce(err405) // PUT /episode/monitor → 405
-        .mockResolvedValueOnce({ data: { id: 99, monitored: true } }) // GET /episode/{id}
-        .mockResolvedValueOnce({}); // PUT /episode
-
-      const result = await plugin(baseArgs);
-
-      expect(result.outputNumber).toBe(1);
-      expect(baseArgs.jobLog).toHaveBeenCalledWith(
-        expect.stringContaining('falling back to PUT /episode'),
-      );
-      expect(baseArgs.jobLog).toHaveBeenCalledWith(
-        expect.stringContaining('via PUT /episode'),
+        expect.stringContaining('unmonitored S1E5 (episodeId=99)'),
       );
     });
 
@@ -334,7 +348,7 @@ describe('notifyRadarrOrSonarr 3.0.0 Plugin', () => {
       const result = await plugin(baseArgs);
 
       expect(result.outputNumber).toBe(1);
-      expect(baseArgs.jobLog).toHaveBeenCalledWith("Movie '777' found for imdb 'tt9999999'");
+      expect(baseArgs.jobLog).toHaveBeenCalledWith("Movie '777' found for 'imdb:tt9999999'");
     });
 
     it('handles API errors by throwing', async () => {

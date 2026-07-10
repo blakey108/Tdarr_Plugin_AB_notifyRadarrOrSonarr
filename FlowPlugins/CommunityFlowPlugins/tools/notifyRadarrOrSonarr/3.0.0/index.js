@@ -1,15 +1,4 @@
 "use strict";
-var __assign = (this && this.__assign) || function () {
-    __assign = Object.assign || function(t) {
-        for (var s, i = 1, n = arguments.length; i < n; i++) {
-            s = arguments[i];
-            for (var p in s) if (Object.prototype.hasOwnProperty.call(s, p))
-                t[p] = s[p];
-        }
-        return t;
-    };
-    return __assign.apply(this, arguments);
-};
 var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
     function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
     return new (P || (P = Promise))(function (resolve, reject) {
@@ -54,10 +43,24 @@ var parseSxxEyy = function (fileName) {
     var m = (0, fileUtils_1.getFileName)(fileName).match(/S(\d{1,2})E(\d{1,3})/i);
     return m ? { season: Number(m[1]), episode: Number(m[2]) } : null;
 };
+// Plex-style {imdb-tt1234567} / {tmdb-1234} / {tvdb-1234} tags, gated per arr:
+// radarr lookup accepts imdb:/tmdb: terms, sonarr accepts imdb:/tvdb:.
+// Falls back to a bare imdb id anywhere in the path; '' means use the parse API.
+var getLookupTerm = function (arrName, fileName) {
+    var _a, _b;
+    var supported = arrName === 'radarr' ? ['imdb', 'tmdb'] : ['imdb', 'tvdb'];
+    var m = /\{(imdb|tmdb|tvdb)-((?:tt|nm|co|ev|ch|ni)\d{7,10}|\d+)\}/i.exec(fileName);
+    if (m && supported.includes(m[1].toLowerCase())) {
+        return "".concat(m[1].toLowerCase(), ":").concat(m[2]);
+    }
+    var imdbId = (_b = (_a = /\b(?:tt|nm|co|ev|ch|ni)\d{7,10}?\b/i.exec(fileName)) === null || _a === void 0 ? void 0 : _a[0]) !== null && _b !== void 0 ? _b : '';
+    return imdbId ? "imdb:".concat(imdbId) : '';
+};
 /* -------------- plugin details -------------- */
 var details = function () { return ({
     name: 'Notify Radarr or Sonarr',
-    description: 'Notify Radarr or Sonarr to refresh after file change. Optionally unmonitor the item afterwards.',
+    description: 'Notify Radarr or Sonarr to refresh after file change. Optionally unmonitor the item afterwards. '
+        + 'Unlike 2.0.0, does not wait for the scan to complete before continuing.',
     style: {
         borderColor: 'green',
     },
@@ -127,30 +130,30 @@ var details = function () { return ({
     ],
 }); };
 exports.details = details;
-/* -------------- getId (unchanged from 2.0.0) -------------- */
+/* -------------- getId -------------- */
 var getId = function (args, arrApp, fileName) { return __awaiter(void 0, void 0, void 0, function () {
-    var imdbId, id, _a, _b, _c, _d;
-    var _e, _f, _g, _h, _j;
-    return __generator(this, function (_k) {
-        switch (_k.label) {
+    var term, id, _a, _b, _c, _d;
+    var _e, _f, _g;
+    return __generator(this, function (_h) {
+        switch (_h.label) {
             case 0:
-                imdbId = (_f = (_e = /\b(tt|nm|co|ev|ch|ni)\d{7,10}?\b/i.exec(fileName)) === null || _e === void 0 ? void 0 : _e[0]) !== null && _f !== void 0 ? _f : '';
-                if (!(imdbId !== '')) return [3 /*break*/, 2];
+                term = getLookupTerm(arrApp.name, fileName);
+                if (!(term !== '')) return [3 /*break*/, 2];
                 _b = Number;
                 return [4 /*yield*/, args.deps.axios({
                         method: 'get',
-                        url: "".concat(arrApp.host, "/api/v3/").concat(arrApp.name === 'radarr' ? 'movie' : 'series', "/lookup?term=imdb:").concat(imdbId),
+                        url: "".concat(arrApp.host, "/api/v3/").concat(arrApp.name === 'radarr' ? 'movie' : 'series', "/lookup?term=").concat(term),
                         headers: arrApp.headers,
                     })];
             case 1:
-                _a = _b.apply(void 0, [(_j = (_h = (_g = (_k.sent()).data) === null || _g === void 0 ? void 0 : _g[0]) === null || _h === void 0 ? void 0 : _h.id) !== null && _j !== void 0 ? _j : -1]);
+                _a = _b.apply(void 0, [(_g = (_f = (_e = (_h.sent()).data) === null || _e === void 0 ? void 0 : _e[0]) === null || _f === void 0 ? void 0 : _f.id) !== null && _g !== void 0 ? _g : -1]);
                 return [3 /*break*/, 3];
             case 2:
                 _a = -1;
-                _k.label = 3;
+                _h.label = 3;
             case 3:
                 id = _a;
-                args.jobLog("".concat(arrApp.content, " ").concat(id !== -1 ? "'".concat(id, "' found") : 'not found', " for imdb '").concat(imdbId, "'"));
+                args.jobLog("".concat(arrApp.content, " ").concat(id !== -1 ? "'".concat(id, "' found") : 'not found', " for '").concat(term, "'"));
                 if (!(id === -1)) return [3 /*break*/, 5];
                 _d = (_c = arrApp.delegates).getIdFromParseResponse;
                 return [4 /*yield*/, args.deps.axios({
@@ -159,32 +162,29 @@ var getId = function (args, arrApp, fileName) { return __awaiter(void 0, void 0,
                         headers: arrApp.headers,
                     })];
             case 4:
-                id = _d.apply(_c, [(_k.sent())]);
+                id = _d.apply(_c, [(_h.sent())]);
                 args.jobLog("".concat(arrApp.content, " ").concat(id !== -1 ? "'".concat(id, "' found") : 'not found', " for '").concat((0, fileUtils_1.getFileName)(fileName), "'"));
-                _k.label = 5;
+                _h.label = 5;
             case 5: return [2 /*return*/, id];
         }
     });
 }); };
 /* -------------- unmonitor helpers -------------- */
 var unmonitorRadarr = function (args, arrApp, movieId) { return __awaiter(void 0, void 0, void 0, function () {
-    var movie;
     return __generator(this, function (_a) {
         switch (_a.label) {
-            case 0: return [4 /*yield*/, args.deps.axios({
-                    method: 'get',
-                    url: "".concat(arrApp.host, "/api/v3/movie/").concat(movieId),
+            case 0: 
+            // Bulk editor endpoint updates only the monitored flag, so a concurrently
+            // running RefreshMovie command can't be clobbered by a stale full-object PUT.
+            return [4 /*yield*/, args.deps.axios({
+                    method: 'put',
+                    url: "".concat(arrApp.host, "/api/v3/movie/editor"),
                     headers: arrApp.headers,
+                    data: JSON.stringify({ movieIds: [movieId], monitored: false }),
                 })];
             case 1:
-                movie = _a.sent();
-                return [4 /*yield*/, args.deps.axios({
-                        method: 'put',
-                        url: "".concat(arrApp.host, "/api/v3/movie/").concat(movieId),
-                        headers: arrApp.headers,
-                        data: JSON.stringify(__assign(__assign({}, movie.data), { monitored: false })),
-                    })];
-            case 2:
+                // Bulk editor endpoint updates only the monitored flag, so a concurrently
+                // running RefreshMovie command can't be clobbered by a stale full-object PUT.
                 _a.sent();
                 args.jobLog("\u2714 Radarr: movie id=".concat(movieId, " unmonitored"));
                 return [2 /*return*/];
@@ -192,10 +192,9 @@ var unmonitorRadarr = function (args, arrApp, movieId) { return __awaiter(void 0
     });
 }); };
 var unmonitorSonarrEpisode = function (args, arrApp, seriesId, season, episode) { return __awaiter(void 0, void 0, void 0, function () {
-    var eps, match, e_1, code, epFull;
-    var _a;
-    return __generator(this, function (_b) {
-        switch (_b.label) {
+    var eps, match;
+    return __generator(this, function (_a) {
+        switch (_a.label) {
             case 0: return [4 /*yield*/, args.deps.axios({
                     method: 'get',
                     url: "".concat(arrApp.host, "/api/v3/episode"),
@@ -203,7 +202,7 @@ var unmonitorSonarrEpisode = function (args, arrApp, seriesId, season, episode) 
                     params: { seriesId: seriesId },
                 })];
             case 1:
-                eps = _b.sent();
+                eps = _a.sent();
                 match = Array.isArray(eps.data)
                     ? eps.data.find(
                     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -213,50 +212,22 @@ var unmonitorSonarrEpisode = function (args, arrApp, seriesId, season, episode) 
                     args.jobLog("Sonarr: episode S".concat(season, "E").concat(episode, " not found in seriesId ").concat(seriesId));
                     return [2 /*return*/];
                 }
-                _b.label = 2;
-            case 2:
-                _b.trys.push([2, 4, , 5]);
                 return [4 /*yield*/, args.deps.axios({
                         method: 'put',
                         url: "".concat(arrApp.host, "/api/v3/episode/monitor"),
                         headers: arrApp.headers,
-                        params: { includeImages: false },
                         data: JSON.stringify({ monitored: false, episodeIds: [match.id] }),
                     })];
-            case 3:
-                _b.sent();
-                args.jobLog("\u2714 Sonarr: unmonitored S".concat(season, "E").concat(episode, " (episodeId=").concat(match.id, ") via PUT /episode/monitor"));
-                return [2 /*return*/];
-            case 4:
-                e_1 = _b.sent();
-                code = (_a = e_1 === null || e_1 === void 0 ? void 0 : e_1.response) === null || _a === void 0 ? void 0 : _a.status;
-                if (code !== 405 && code !== 404)
-                    throw e_1;
-                args.jobLog("Sonarr /episode/monitor unsupported (".concat(code, "), falling back to PUT /episode"));
-                return [3 /*break*/, 5];
-            case 5: return [4 /*yield*/, args.deps.axios({
-                    method: 'get',
-                    url: "".concat(arrApp.host, "/api/v3/episode/").concat(match.id),
-                    headers: arrApp.headers,
-                })];
-            case 6:
-                epFull = _b.sent();
-                return [4 /*yield*/, args.deps.axios({
-                        method: 'put',
-                        url: "".concat(arrApp.host, "/api/v3/episode"),
-                        headers: arrApp.headers,
-                        data: JSON.stringify([__assign(__assign({}, epFull.data), { monitored: false })]),
-                    })];
-            case 7:
-                _b.sent();
-                args.jobLog("\u2714 Sonarr: unmonitored S".concat(season, "E").concat(episode, " (episodeId=").concat(match.id, ") via PUT /episode"));
+            case 2:
+                _a.sent();
+                args.jobLog("\u2714 Sonarr: unmonitored S".concat(season, "E").concat(episode, " (episodeId=").concat(match.id, ")"));
                 return [2 /*return*/];
         }
     });
 }); };
 /* -------------- main plugin -------------- */
 var plugin = function (args) { return __awaiter(void 0, void 0, void 0, function () {
-    var lib, refreshed, arr, arr_host, arrHost, unmonitorAfterRefresh, originalFileName, currentFileName, headers, arrApp, id, srcPath, sxe, e_2;
+    var lib, refreshed, arr, arr_host, arrHost, unmonitorAfterRefresh, originalFileName, currentFileName, headers, arrApp, id, srcPath, sxe, e_1;
     var _a, _b, _c, _d;
     return __generator(this, function (_e) {
         switch (_e.label) {
@@ -342,8 +313,8 @@ var plugin = function (args) { return __awaiter(void 0, void 0, void 0, function
                 _e.label = 10;
             case 10: return [3 /*break*/, 12];
             case 11:
-                e_2 = _e.sent();
-                args.jobLog("Unmonitor error (non-fatal): ".concat((e_2 === null || e_2 === void 0 ? void 0 : e_2.message) || String(e_2)));
+                e_1 = _e.sent();
+                args.jobLog("Unmonitor error (non-fatal): ".concat((e_1 === null || e_1 === void 0 ? void 0 : e_1.message) || String(e_1)));
                 return [3 /*break*/, 12];
             case 12: return [2 /*return*/, {
                     outputFileObj: args.inputFileObj,
